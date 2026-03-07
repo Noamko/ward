@@ -87,11 +87,11 @@ pub fn render(frame: &mut Frame, app: &AppState, area: ratatui::layout::Rect) {
             let due_str = r.due_at.map(|d| {
                 let local = d.with_timezone(&Local);
                 if r.is_overdue() {
-                    format!(" ⚠ {}", local.format("%m/%d %H:%M"))
+                    format!(" ⚠ {}", local.format("%d/%m %H:%M"))
                 } else if r.is_due_today() {
                     format!(" ◷ {}", local.format("%H:%M"))
                 } else {
-                    format!(" {}", local.format("%m/%d"))
+                    format!(" {}", local.format("%d/%m"))
                 }
             });
 

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use ward_core::{
     model::{Folder, Item, Note, Priority, Recurrence, Reminder, ReminderList, Store, Subtask},
     notify,
@@ -108,6 +108,32 @@ pub enum EditField {
     Priority,
     Tags,
     Recurrence,
+    NotifyBefore,
+}
+
+/// Ordered list of minutes-before options for the notification field.
+pub const NOTIFY_BEFORE_OPTIONS: &[u32] = &[0, 5, 15, 30, 60, 120, 1440];
+
+pub fn notify_before_label(mins: u32) -> &'static str {
+    match mins {
+        0 => "At due time",
+        5 => "5 min before",
+        15 => "15 min before",
+        30 => "30 min before",
+        60 => "1 hour before",
+        120 => "2 hours before",
+        1440 => "1 day before",
+        _ => "Custom",
+    }
+}
+
+pub fn cycle_notify_before(mins: u32, forward: bool) -> u32 {
+    let pos = NOTIFY_BEFORE_OPTIONS.iter().position(|&v| v == mins).unwrap_or(0);
+    if forward {
+        NOTIFY_BEFORE_OPTIONS[(pos + 1) % NOTIFY_BEFORE_OPTIONS.len()]
+    } else {
+        NOTIFY_BEFORE_OPTIONS[(pos + NOTIFY_BEFORE_OPTIONS.len() - 1) % NOTIFY_BEFORE_OPTIONS.len()]
+    }
 }
 
 pub struct EditState {
@@ -116,6 +142,7 @@ pub struct EditState {
     pub priority: Priority,
     pub tags_input: Input,
     pub recurrence: Option<Recurrence>,
+    pub notify_before_mins: u32,
     #[allow(dead_code)]
     pub due_error: Option<String>,
     pub focused_field: EditField,
@@ -131,6 +158,7 @@ impl EditState {
             priority: Priority::Medium,
             tags_input: Input::default(),
             recurrence: None,
+            notify_before_mins: 0,
             due_error: None,
             focused_field: EditField::Title,
             editing_reminder_id: None,
@@ -141,7 +169,7 @@ impl EditState {
     pub fn from_reminder(r: &Reminder) -> Self {
         let due_str = r
             .due_at
-            .map(|d| d.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
+            .map(|d| d.with_timezone(&Local).format("%d/%m/%y:%H:%M").to_string())
             .unwrap_or_default();
         Self {
             title: Input::new(r.title.clone()),
@@ -149,6 +177,7 @@ impl EditState {
             priority: r.priority.clone(),
             tags_input: Input::new(r.tags.join(", ")),
             recurrence: r.recurrence.clone(),
+            notify_before_mins: r.notify_before_mins,
             due_error: None,
             focused_field: EditField::Title,
             editing_reminder_id: Some(r.id.clone()),
@@ -405,8 +434,8 @@ fn check_due_recursive(items: &mut [Item], now: DateTime<Utc>) -> bool {
             Item::List(list) => {
                 for reminder in &mut list.reminders {
                     if reminder.done || reminder.notified { continue; }
-                    if let Some(due) = reminder.due_at {
-                        if due <= now {
+                    if let Some(notify_at) = reminder.notify_at() {
+                        if notify_at <= now {
                             let body = reminder.notes.as_deref().unwrap_or("Due now.");
                             notify::fire(&reminder.title, body).ok();
                             if !reminder.advance_recurrence() {
@@ -1128,6 +1157,7 @@ impl AppState {
         let tags = parse_tags(es.tags_input.value());
         let recurrence = es.recurrence;
         let subtasks = es.subtasks;
+        let notify_before_mins = es.notify_before_mins;
 
         if let Some(id) = es.editing_reminder_id {
             if let Some(list) = self.current_list_mut() {
@@ -1138,6 +1168,7 @@ impl AppState {
                     r.tags = tags;
                     r.recurrence = recurrence;
                     r.subtasks = subtasks;
+                    r.notify_before_mins = notify_before_mins;
                     r.touch();
                 }
             }
@@ -1148,6 +1179,7 @@ impl AppState {
             r.tags = tags;
             r.recurrence = recurrence;
             r.subtasks = subtasks;
+            r.notify_before_mins = notify_before_mins;
             if let Some(list) = self.current_list_mut() {
                 list.reminders.push(r);
             }
@@ -1240,7 +1272,7 @@ impl AppState {
                 if let Some(due) = r.due_at {
                     out.push_str(&format!(
                         "  - Due: {}\n",
-                        due.with_timezone(&Local).format("%Y-%m-%d %H:%M")
+                        due.with_timezone(&Local).format("%d/%m/%y %H:%M")
                     ));
                 }
                 for s in &r.subtasks {
@@ -1317,9 +1349,25 @@ pub fn parse_tags(input: &str) -> Vec<String> {
 }
 
 /// Parse a human-readable due date string into a UTC DateTime.
+///
+/// Supported formats:
+///   dd/mm[:hh[:mm[:ss]]]          — current year, time optional
+///   dd/mm/yy[:hh[:mm[:ss]]]       — 20yy year
+///   dd/mm/yyyy[:hh[:mm[:ss]]]     — full year
+///   today / tomorrow [HH:MM]
+///   next <weekday> [HH:MM]
+///   in <n> days [HH:MM]
+///   yyyy-mm-dd [HH:MM]
 pub fn parse_due(input: &str) -> Option<DateTime<Utc>> {
     if input.is_empty() { return None; }
-    let lower = input.to_lowercase();
+    let s = input.trim();
+
+    // New dd/mm[/yyyy] format (contains a forward slash)
+    if s.contains('/') {
+        return parse_slash_date(s);
+    }
+
+    let lower = s.to_lowercase();
     let now = Local::now();
     let today = now.date_naive();
 
@@ -1340,6 +1388,67 @@ pub fn parse_due(input: &str) -> Option<DateTime<Utc>> {
     };
 
     let naive = NaiveDateTime::new(date?, time);
+    Local.from_local_datetime(&naive).single().map(|dt| dt.with_timezone(&Utc))
+}
+
+/// Parse `dd/mm[/yy|yyyy][:hh[:mm[:ss]]]`
+fn parse_slash_date(s: &str) -> Option<DateTime<Utc>> {
+    let now = Local::now();
+    let current_year = now.year();
+
+    let slash_count = s.chars().filter(|&c| c == '/').count();
+
+    // Split into date string and optional time string.
+    // Date components are separated by `/`; the time starts after the first `:`
+    // that follows the last `/`.
+    let (date_str, time_str): (&str, Option<&str>) = match slash_count {
+        1 => {
+            // dd/mm or dd/mm:hh…
+            if let Some(pos) = s.find(':') {
+                (&s[..pos], Some(&s[pos + 1..]))
+            } else {
+                (s, None)
+            }
+        }
+        2 => {
+            // dd/mm/yy[yy] or dd/mm/yy[yy]:hh…
+            let last_slash = s.rfind('/')?;
+            let after = &s[last_slash + 1..];
+            if let Some(colon_pos) = after.find(':') {
+                let date_end = last_slash + 1 + colon_pos;
+                (&s[..date_end], Some(&s[date_end + 1..]))
+            } else {
+                (s, None)
+            }
+        }
+        _ => return None,
+    };
+
+    // Parse day / month / optional year
+    let parts: Vec<&str> = date_str.split('/').collect();
+    let day: u32 = parts.first()?.trim().parse().ok()?;
+    let month: u32 = parts.get(1)?.trim().parse().ok()?;
+    let year: i32 = if let Some(y_str) = parts.get(2) {
+        let y: i32 = y_str.trim().parse().ok()?;
+        if y < 100 { 2000 + y } else { y }
+    } else {
+        current_year
+    };
+
+    let date = NaiveDate::from_ymd_opt(year, month, day)?;
+
+    // Parse optional time: hh, hh:mm, or hh:mm:ss
+    let time = if let Some(ts) = time_str {
+        let tp: Vec<&str> = ts.split(':').collect();
+        let h: u32 = tp.first()?.trim().parse().ok()?;
+        let m: u32 = tp.get(1).and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+        let sec: u32 = tp.get(2).and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+        NaiveTime::from_hms_opt(h, m, sec)?
+    } else {
+        NaiveTime::from_hms_opt(9, 0, 0)?
+    };
+
+    let naive = NaiveDateTime::new(date, time);
     Local.from_local_datetime(&naive).single().map(|dt| dt.with_timezone(&Utc))
 }
 

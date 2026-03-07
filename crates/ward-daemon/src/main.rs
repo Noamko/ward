@@ -31,8 +31,8 @@ fn fire_due_notifications(items: &mut Vec<Item>, now: chrono::DateTime<Utc>) -> 
                 let mut list_changed = false;
                 for r in &mut list.reminders {
                     if r.done || r.notified { continue; }
-                    if let Some(due) = r.due_at {
-                        if due <= now {
+                    if let Some(notify_at) = r.notify_at() {
+                        if notify_at <= now {
                             let body = r.notes.as_deref().unwrap_or("Due now.");
                             notify::fire(&r.title, body).ok();
                             if !r.advance_recurrence() { r.notified = true; }

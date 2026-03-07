@@ -263,6 +263,9 @@ pub struct Reminder {
     pub priority: Priority,
     pub done: bool,
     pub notified: bool,
+    /// Minutes before due_at to fire the notification (0 = at due time).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub notify_before_mins: u32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// Free-form tags, e.g. ["work", "urgent"].
@@ -276,6 +279,8 @@ pub struct Reminder {
     pub subtasks: Vec<Subtask>,
 }
 
+fn is_zero_u32(v: &u32) -> bool { *v == 0 }
+
 impl Reminder {
     pub fn new(title: &str) -> Self {
         let now = Utc::now();
@@ -287,12 +292,18 @@ impl Reminder {
             priority: Priority::Medium,
             done: false,
             notified: false,
+            notify_before_mins: 0,
             created_at: now,
             updated_at: now,
             tags: vec![],
             recurrence: None,
             subtasks: vec![],
         }
+    }
+
+    /// Returns the UTC time at which the notification should fire.
+    pub fn notify_at(&self) -> Option<DateTime<Utc>> {
+        self.due_at.map(|due| due - chrono::Duration::minutes(self.notify_before_mins as i64))
     }
 
     pub fn is_overdue(&self) -> bool {

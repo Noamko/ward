@@ -359,24 +359,30 @@ fn handle_edit_reminder(app: &mut AppState, key: KeyEvent) -> Result<Action> {
                 EditField::DueAt => EditField::Priority,
                 EditField::Priority => EditField::Tags,
                 EditField::Tags => EditField::Recurrence,
-                EditField::Recurrence => EditField::Title,
+                EditField::Recurrence => EditField::NotifyBefore,
+                EditField::NotifyBefore => EditField::Title,
             };
         }
         KeyCode::BackTab => {
             let es = app.edit.as_mut().unwrap();
             es.focused_field = match es.focused_field {
-                EditField::Title => EditField::Recurrence,
+                EditField::Title => EditField::NotifyBefore,
                 EditField::DueAt => EditField::Title,
                 EditField::Priority => EditField::DueAt,
                 EditField::Tags => EditField::Priority,
                 EditField::Recurrence => EditField::Tags,
+                EditField::NotifyBefore => EditField::Recurrence,
             };
         }
         KeyCode::Left | KeyCode::Right => {
             let es = app.edit.as_mut().unwrap();
+            let forward = key.code == KeyCode::Right;
             match es.focused_field {
                 EditField::Priority => { es.priority = es.priority.next(); }
-                EditField::Recurrence => { es.recurrence = cycle_recurrence(&es.recurrence); }
+                EditField::Recurrence => { es.recurrence = cycle_recurrence(&es.recurrence, forward); }
+                EditField::NotifyBefore => {
+                    es.notify_before_mins = app::cycle_notify_before(es.notify_before_mins, forward);
+                }
                 _ => dispatch_input(es, key),
             }
         }
@@ -394,14 +400,25 @@ fn dispatch_input(es: &mut app::EditState, key: KeyEvent) {
         EditField::Title => { es.title.handle_event(&Event::Key(key)); }
         EditField::DueAt => { es.due_input.handle_event(&Event::Key(key)); }
         EditField::Tags => { es.tags_input.handle_event(&Event::Key(key)); }
-        EditField::Priority | EditField::Recurrence => {}
+        EditField::Priority | EditField::Recurrence | EditField::NotifyBefore => {}
     }
 }
 
-fn cycle_recurrence(current: &Option<Recurrence>) -> Option<Recurrence> {
-    match current {
-        None => Some(Recurrence::Daily),
-        Some(r) => r.next_variant(),
+fn cycle_recurrence(current: &Option<Recurrence>, forward: bool) -> Option<Recurrence> {
+    if forward {
+        match current {
+            None => Some(Recurrence::Daily),
+            Some(r) => r.next_variant(),
+        }
+    } else {
+        match current {
+            None => Some(Recurrence::Yearly),
+            Some(Recurrence::Daily) => None,
+            Some(Recurrence::Weekly) => Some(Recurrence::Daily),
+            Some(Recurrence::Monthly) => Some(Recurrence::Weekly),
+            Some(Recurrence::Yearly) => Some(Recurrence::Monthly),
+            Some(Recurrence::EveryNDays(_)) => None,
+        }
     }
 }
 
@@ -586,8 +603,8 @@ fn check_item_due(
         Item::List(list) => {
             for r in &mut list.reminders {
                 if r.done || r.notified { continue; }
-                if let Some(due) = r.due_at {
-                    if due <= now {
+                if let Some(notify_at) = r.notify_at() {
+                    if notify_at <= now {
                         let body = r.notes.as_deref().unwrap_or("Due now.");
                         fire(&r.title, body).ok();
                         if !r.advance_recurrence() { r.notified = true; }

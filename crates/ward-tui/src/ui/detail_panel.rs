@@ -1,4 +1,4 @@
-use crate::app::{AppMode, AppState, EditField, Panel};
+use crate::app::{notify_before_label, AppMode, AppState, EditField, Panel};
 use crate::ui::theme;
 use chrono::Local;
 use ratatui::{
@@ -99,7 +99,7 @@ fn render_reminder_detail(frame: &mut Frame, app: &AppState, area: Rect) {
 
     let due_str = r.due_at.map(|d| {
         d.with_timezone(&Local)
-            .format("%Y-%m-%d %H:%M")
+            .format("%d/%m/%y %H:%M")
             .to_string()
     });
 
@@ -190,6 +190,17 @@ fn render_reminder_detail(frame: &mut Frame, app: &AppState, area: Rect) {
         ]));
     }
 
+    // Notification timing
+    if r.due_at.is_some() {
+        lines.push(Line::from(vec![
+            Span::styled("  Notify:   ", theme::dim()),
+            Span::styled(
+                notify_before_label(r.notify_before_mins),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]));
+    }
+
     // Subtasks
     if !r.subtasks.is_empty() {
         lines.push(Line::from(""));
@@ -222,7 +233,7 @@ fn render_reminder_detail(frame: &mut Frame, app: &AppState, area: Rect) {
         Span::styled(
             r.created_at
                 .with_timezone(&Local)
-                .format("%Y-%m-%d %H:%M")
+                .format("%d/%m/%y %H:%M")
                 .to_string(),
             theme::dim(),
         ),
@@ -248,6 +259,8 @@ fn render_edit_form(frame: &mut Frame, app: &AppState, area: Rect) {
             Constraint::Length(3), // tags input
             Constraint::Length(1), // recurrence label
             Constraint::Length(3), // recurrence selector
+            Constraint::Length(1), // notify before label
+            Constraint::Length(3), // notify before selector
             Constraint::Min(0),
         ])
         .split(area);
@@ -308,13 +321,13 @@ fn render_edit_form(frame: &mut Frame, app: &AppState, area: Rect) {
 
     // Due parse preview / error
     let preview = if es.due_input.value().trim().is_empty() {
-        Span::styled("  no due date", theme::dim())
+        Span::styled("  dd/mm  dd/mm/yy  dd/mm:hh  dd/mm:hh:mm  today  tomorrow  next mon", theme::dim())
     } else {
         match crate::app::parse_due(es.due_input.value().trim()) {
             Some(dt) => Span::styled(
                 format!(
                     "  → {}",
-                    dt.with_timezone(&Local).format("%Y-%m-%d %H:%M")
+                    dt.with_timezone(&Local).format("%d/%m/%y %H:%M")
                 ),
                 Style::default().fg(theme::GREEN),
             ),
@@ -388,6 +401,24 @@ fn render_edit_form(frame: &mut Frame, app: &AppState, area: Rect) {
         ),
     };
     frame.render_widget(Paragraph::new(Line::from(rec_label)), rec_inner);
+
+    // Notify before
+    let notify_active = es.focused_field == EditField::NotifyBefore;
+    frame.render_widget(
+        Paragraph::new("Notify (←→):").style(if notify_active { theme::accent() } else { theme::dim() }),
+        chunks[11],
+    );
+    let notify_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(if notify_active { theme::active_border() } else { theme::inactive_border() })
+        .style(Style::default().bg(theme::SURFACE));
+    let notify_inner = notify_block.inner(chunks[12]);
+    frame.render_widget(notify_block, chunks[12]);
+    let notify_label = Span::styled(
+        format!("  {}", notify_before_label(es.notify_before_mins)),
+        Style::default().fg(Color::Cyan),
+    );
+    frame.render_widget(Paragraph::new(Line::from(notify_label)), notify_inner);
 }
 
 // ── Markdown renderer ─────────────────────────────────────────────────────────
