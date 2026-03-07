@@ -1,0 +1,11 @@
+[Unit]
+Description=ward reminder notification daemon
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.cargo/bin/ward daemon
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

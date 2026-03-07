@@ -1,0 +1,13 @@
+[package]
+name = "ward-daemon"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ward-daemon"
+path = "src/main.rs"
+
+[dependencies]
+ward-core = { path = "../ward-core" }
+anyhow = "1"
+chrono = "0.4"
