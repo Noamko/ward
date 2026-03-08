@@ -6,6 +6,7 @@ use ward_core::{
     paths::save_last_dir,
     store::{load_dir, save_all_to_disk, save_item_to_disk},
 };
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tui_input::Input;
 
@@ -33,6 +34,9 @@ pub enum AppMode {
     Help,
     Search,
     MoveReminder,
+    BulkSelect,
+    MoveItem,
+    CommandPalette,
 }
 
 // ── Sort ──────────────────────────────────────────────────────────────────────
@@ -97,6 +101,53 @@ pub struct SearchResult {
     pub match_start: usize,
     pub match_end: usize,
     pub jump: SearchJump,
+}
+
+// ── Command palette ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandAction {
+    NewList,
+    NewNote,
+    NewFolder,
+    NewReminder,
+    BeginSearch,
+    CycleSort,
+    ToggleDone,
+    ToggleShowDone,
+    ExportCurrent,
+    Undo,
+    ShowHelp,
+    BulkSelect,
+    MoveReminder,
+    MoveItem,
+}
+
+#[derive(Clone)]
+pub struct CommandEntry {
+    pub name:        &'static str,
+    pub description: &'static str,
+    pub shortcut:    &'static str,
+    pub action:      CommandAction,
+}
+
+pub fn all_commands() -> Vec<CommandEntry> {
+    vec![
+        CommandEntry { name: "New List",              description: "Create a new reminder list",              shortcut: "n",     action: CommandAction::NewList },
+        CommandEntry { name: "New Note",              description: "Create a new markdown note",              shortcut: "N",     action: CommandAction::NewNote },
+        CommandEntry { name: "New Folder",            description: "Create a new folder / group",             shortcut: "f",     action: CommandAction::NewFolder },
+        CommandEntry { name: "New Reminder",          description: "Add a reminder to the current list",      shortcut: "n",     action: CommandAction::NewReminder },
+        CommandEntry { name: "Search",                description: "Search across all reminders and notes",   shortcut: "/",     action: CommandAction::BeginSearch },
+        CommandEntry { name: "Bulk Select",           description: "Enter bulk-select mode for reminders",    shortcut: "V",     action: CommandAction::BulkSelect },
+        CommandEntry { name: "Move Reminder",         description: "Move reminder to another list",           shortcut: "m",     action: CommandAction::MoveReminder },
+        CommandEntry { name: "Move to Folder",        description: "Move sidebar item into a folder/group",   shortcut: "g",     action: CommandAction::MoveItem },
+        CommandEntry { name: "Toggle Done",           description: "Mark selected reminder done / undone",    shortcut: "Space", action: CommandAction::ToggleDone },
+        CommandEntry { name: "Toggle Show Completed", description: "Show or hide completed reminders",        shortcut: "h",     action: CommandAction::ToggleShowDone },
+        CommandEntry { name: "Sort",                  description: "Cycle sort order (due, priority, title…)", shortcut: "s",    action: CommandAction::CycleSort },
+        CommandEntry { name: "Export",                description: "Export current list or note to ~/name.md", shortcut: "x",   action: CommandAction::ExportCurrent },
+        CommandEntry { name: "Undo",                  description: "Undo the last action",                    shortcut: "u",     action: CommandAction::Undo },
+        CommandEntry { name: "Help",                  description: "Show all keybindings",                    shortcut: "?",     action: CommandAction::ShowHelp },
+    ]
 }
 
 // ── Edit states ───────────────────────────────────────────────────────────────
@@ -485,6 +536,13 @@ pub struct AppState {
     // Status message (shown briefly in status bar)
     pub status_message: Option<String>,
     pub status_ticks: u8,
+    // Bulk selection (reminder IDs)
+    pub bulk_selected: HashSet<String>,
+    // Move sidebar item to folder
+    pub move_item_src_path: Option<Vec<usize>>,
+    // Command palette
+    pub command_input: Input,
+    pub command_cursor: usize,
 }
 
 impl AppState {
@@ -514,6 +572,10 @@ impl AppState {
             move_list_cursor: 0,
             status_message: None,
             status_ticks: 0,
+            bulk_selected: HashSet::new(),
+            move_item_src_path: None,
+            command_input: Input::default(),
+            command_cursor: 0,
         })
     }
 
@@ -583,6 +645,30 @@ impl AppState {
 
     pub fn flat_sidebar_len(&self) -> usize {
         self.flat_sidebar().len()
+    }
+
+    /// All folder entries in the flat sidebar view (for pickers).
+    pub fn flat_folders(&self) -> Vec<FlatItem> {
+        self.flat_sidebar()
+            .into_iter()
+            .filter(|fi| matches!(item_at_path(&self.store.items, &fi.path), Some(Item::Folder(_))))
+            .collect()
+    }
+
+    /// Path of the Vec<Item> container where new sidebar items should be inserted.
+    /// Returns [] (root) when a non-folder is selected; returns the folder's own path when a
+    /// folder is selected (so new items land inside it).
+    fn insertion_parent_path(&self) -> Vec<usize> {
+        let flat = self.flat_sidebar();
+        if let Some(fi) = flat.get(self.selected_item) {
+            let path = &fi.path;
+            match item_at_path(&self.store.items, path) {
+                Some(Item::Folder(_)) => path.clone(),
+                _ => path[..path.len().saturating_sub(1)].to_vec(),
+            }
+        } else {
+            vec![]
+        }
     }
 
     // ── Selectors ─────────────────────────────────────────────────────────────
@@ -872,31 +958,40 @@ impl AppState {
                 }
             }
         } else if le.is_note {
+            let ins_path = self.insertion_parent_path();
             let target_dir = self.current_dir();
             let file_path = unique_file_path(&target_dir, &name, "md");
             std::fs::write(&file_path, "").ok();
             let mut note = Note::new(&name);
             note.icon = icon;
             note.file_path = Some(file_path);
-            self.store.items.push(Item::Note(note));
+            if let Some(c) = children_at_path_mut(&mut self.store.items, &ins_path) {
+                c.push(Item::Note(note));
+            }
             self.selected_item = self.flat_sidebar_len().saturating_sub(1);
         } else if le.is_folder {
+            let ins_path = self.insertion_parent_path();
             let target_dir = self.current_dir();
             let dir_path = unique_dir_path(&target_dir, &name);
             std::fs::create_dir_all(&dir_path).ok();
             let mut folder = Folder::new(&name);
             folder.icon = icon;
             folder.dir_path = Some(dir_path);
-            self.store.items.push(Item::Folder(folder));
+            if let Some(c) = children_at_path_mut(&mut self.store.items, &ins_path) {
+                c.push(Item::Folder(folder));
+            }
             self.selected_item = self.flat_sidebar_len().saturating_sub(1);
         } else {
+            let ins_path = self.insertion_parent_path();
             let target_dir = self.current_dir();
             let file_path = unique_file_path(&target_dir, &name, "json");
             let mut new_list = ReminderList::new(&name, icon.as_deref());
             new_list.file_path = Some(file_path.clone());
             let json = serde_json::to_string_pretty(&new_list).unwrap_or_default();
             std::fs::write(&file_path, json).ok();
-            self.store.items.push(Item::List(new_list));
+            if let Some(c) = children_at_path_mut(&mut self.store.items, &ins_path) {
+                c.push(Item::List(new_list));
+            }
             self.selected_item = self.flat_sidebar_len().saturating_sub(1);
         }
         self.mode = AppMode::Browse;
@@ -915,6 +1010,9 @@ impl AppState {
     }
 
     pub fn confirm_delete(&mut self) -> Result<()> {
+        if !self.bulk_selected.is_empty() {
+            return self.bulk_commit_delete();
+        }
         match self.active_panel {
             Panel::Lists => {
                 let path = self.flat_sidebar().get(self.selected_item).map(|fi| fi.path.clone());
@@ -1061,6 +1159,9 @@ impl AppState {
     }
 
     pub fn commit_move_reminder(&mut self) -> Result<()> {
+        if self.move_src_id.is_none() && !self.bulk_selected.is_empty() {
+            return self.commit_bulk_move();
+        }
         let Some(src_id) = self.move_src_id.take() else {
             self.mode = AppMode::Browse;
             return Ok(());
@@ -1124,6 +1225,216 @@ impl AppState {
     pub fn cancel_move(&mut self) {
         self.move_src_id = None;
         self.mode = AppMode::Browse;
+    }
+
+    // ── Bulk selection ────────────────────────────────────────────────────────
+
+    pub fn begin_bulk_select(&mut self) {
+        if self.current_list().is_none() { return; }
+        self.bulk_selected.clear();
+        self.mode = AppMode::BulkSelect;
+    }
+
+    pub fn bulk_toggle_current(&mut self) {
+        let id = self.visible_reminders().get(self.selected_reminder).map(|r| r.id.clone());
+        if let Some(id) = id {
+            if !self.bulk_selected.remove(&id) {
+                self.bulk_selected.insert(id);
+            }
+        }
+    }
+
+    pub fn cancel_bulk(&mut self) {
+        self.bulk_selected.clear();
+        self.mode = AppMode::Browse;
+    }
+
+    pub fn begin_bulk_delete(&mut self) {
+        if self.bulk_selected.is_empty() { return; }
+        let n = self.bulk_selected.len();
+        self.delete_label = format!("{} selected reminder{}", n, if n == 1 { "" } else { "s" });
+        self.mode = AppMode::ConfirmDelete;
+    }
+
+    pub fn bulk_mark_done(&mut self) -> Result<()> {
+        if self.bulk_selected.is_empty() { return Ok(()); }
+        let ids: Vec<String> = self.bulk_selected.iter().cloned().collect();
+        if let Some(list) = self.current_list_mut() {
+            for r in list.reminders.iter_mut() {
+                if ids.contains(&r.id) {
+                    r.done = true;
+                    r.notified = true;
+                    r.updated_at = Utc::now();
+                }
+            }
+        }
+        let n = ids.len();
+        self.bulk_selected.clear();
+        self.mode = AppMode::Browse;
+        self.clamp_selection();
+        self.set_status(format!("Marked {} reminder{} done.", n, if n == 1 { "" } else { "s" }));
+        self.save()
+    }
+
+    pub fn bulk_commit_delete(&mut self) -> Result<()> {
+        let ids: Vec<String> = self.bulk_selected.drain().collect();
+        if let Some(list) = self.current_list_mut() {
+            list.reminders.retain(|r| !ids.contains(&r.id));
+        }
+        let n = ids.len();
+        self.mode = AppMode::Browse;
+        self.clamp_selection();
+        self.set_status(format!("Deleted {} reminder{}.", n, if n == 1 { "" } else { "s" }));
+        self.save()
+    }
+
+    pub fn begin_bulk_move(&mut self) {
+        if self.bulk_selected.is_empty() { return; }
+        self.move_src_id = None;
+        self.move_list_cursor = self.selected_item;
+        self.mode = AppMode::MoveReminder;
+    }
+
+    pub fn commit_bulk_move(&mut self) -> Result<()> {
+        if self.bulk_selected.is_empty() {
+            self.mode = AppMode::Browse;
+            return Ok(());
+        }
+        let source_flat_idx = self.selected_item;
+        let target_flat_idx = self.move_list_cursor;
+        let flat = self.flat_sidebar();
+        let source_path = flat.get(source_flat_idx).map(|fi| fi.path.clone());
+        let target_path = flat.get(target_flat_idx).map(|fi| fi.path.clone());
+        let (Some(source_path), Some(target_path)) = (source_path, target_path) else {
+            self.mode = AppMode::Browse;
+            return Ok(());
+        };
+        if source_path == target_path {
+            self.mode = AppMode::Browse;
+            return Ok(());
+        }
+        if item_at_path(&self.store.items, &target_path).and_then(|i| i.as_list()).is_none() {
+            self.mode = AppMode::Browse;
+            return Ok(());
+        }
+        let ids: Vec<String> = self.bulk_selected.drain().collect();
+        let src_list_id = item_at_path(&self.store.items, &source_path)
+            .and_then(|i| i.as_list()).map(|l| l.id.clone());
+        let target_list_id = item_at_path(&self.store.items, &target_path)
+            .and_then(|i| i.as_list()).map(|l| l.id.clone());
+        let (Some(src_id), Some(tgt_id)) = (src_list_id, target_list_id) else {
+            self.mode = AppMode::Browse;
+            return Ok(());
+        };
+        let reminders: Vec<Reminder> = find_item_mut_by_id(&mut self.store.items, &src_id)
+            .and_then(|i| i.as_list_mut())
+            .map(|l| {
+                let mut moved = Vec::new();
+                l.reminders.retain(|r| {
+                    if ids.contains(&r.id) { moved.push(r.clone()); false } else { true }
+                });
+                moved
+            })
+            .unwrap_or_default();
+        let n = reminders.len();
+        if let Some(target) = find_item_mut_by_id(&mut self.store.items, &tgt_id)
+            .and_then(|i| i.as_list_mut())
+        {
+            target.reminders.extend(reminders);
+        }
+        self.mode = AppMode::Browse;
+        self.clamp_selection();
+        self.set_status(format!("Moved {} reminder{}.", n, if n == 1 { "" } else { "s" }));
+        self.save()
+    }
+
+    // ── Move sidebar item to folder ───────────────────────────────────────────
+
+    pub fn begin_move_item(&mut self) {
+        if self.current_item().is_none() { return; }
+        let path = self.flat_sidebar().get(self.selected_item).map(|fi| fi.path.clone());
+        if let Some(path) = path {
+            self.move_item_src_path = Some(path);
+            self.move_list_cursor = 0;
+            self.mode = AppMode::MoveItem;
+        }
+    }
+
+    pub fn cancel_move_item(&mut self) {
+        self.move_item_src_path = None;
+        self.mode = AppMode::Browse;
+    }
+
+    pub fn commit_move_item(&mut self) -> Result<()> {
+        let Some(src_path) = self.move_item_src_path.take() else {
+            self.mode = AppMode::Browse;
+            return Ok(());
+        };
+        let all_folders = self.flat_folders();
+        let cursor = self.move_list_cursor;
+
+        // cursor == 0 → move to workspace root; cursor > 0 → into a folder
+        let (target_dir, target_folder_id) = if cursor == 0 {
+            (self.opened_dir.clone(), None)
+        } else if let Some(fi) = all_folders.get(cursor - 1) {
+            match item_at_path(&self.store.items, &fi.path) {
+                Some(Item::Folder(f)) => {
+                    // Guard: can't move into a descendant of itself
+                    if fi.path.starts_with(&src_path) {
+                        self.set_status("Cannot move a folder into itself.");
+                        self.mode = AppMode::Browse;
+                        return Ok(());
+                    }
+                    (f.dir_path.clone().unwrap_or(self.opened_dir.clone()), Some(f.id.clone()))
+                }
+                _ => { self.mode = AppMode::Browse; return Ok(()); }
+            }
+        } else {
+            self.mode = AppMode::Browse;
+            return Ok(());
+        };
+
+        // Remove item from tree
+        let Some(mut item) = remove_at_path(&mut self.store.items, &src_path) else {
+            self.mode = AppMode::Browse;
+            return Ok(());
+        };
+
+        // Move backing file / directory on disk and update stored path
+        match &mut item {
+            Item::List(l) => {
+                if let Some(old) = l.file_path.clone() {
+                    let new_path = unique_file_path(&target_dir, &l.name, "json");
+                    if std::fs::rename(&old, &new_path).is_ok() { l.file_path = Some(new_path); }
+                }
+            }
+            Item::Note(n) => {
+                if let Some(old) = n.file_path.clone() {
+                    let new_path = unique_file_path(&target_dir, &n.title, "md");
+                    if std::fs::rename(&old, &new_path).is_ok() { n.file_path = Some(new_path); }
+                }
+            }
+            Item::Folder(f) => {
+                if let Some(old) = f.dir_path.clone() {
+                    let new_dir = unique_dir_path(&target_dir, &f.name);
+                    if std::fs::rename(&old, &new_dir).is_ok() { f.dir_path = Some(new_dir); }
+                }
+            }
+        }
+
+        // Insert into target (look up folder by ID so shifted paths don't matter)
+        if let Some(folder_id) = target_folder_id {
+            if let Some(folder_item) = find_item_mut_by_id(&mut self.store.items, &folder_id) {
+                if let Item::Folder(f) = folder_item { f.children.push(item); }
+            }
+        } else {
+            self.store.items.push(item);
+        }
+
+        self.mode = AppMode::Browse;
+        self.clamp_selection();
+        self.set_status("Item moved.");
+        self.save()
     }
 
     // ── Reminder operations ───────────────────────────────────────────────────
@@ -1252,6 +1563,92 @@ impl AppState {
             }
         }
         self.save()
+    }
+
+    // ── Command palette ───────────────────────────────────────────────────────
+
+    pub fn open_command_palette(&mut self) {
+        self.command_input = Input::default();
+        self.command_cursor = 0;
+        self.mode = AppMode::CommandPalette;
+    }
+
+    pub fn cancel_command_palette(&mut self) {
+        self.mode = AppMode::Browse;
+    }
+
+    pub fn filtered_commands(&self) -> Vec<CommandEntry> {
+        let q = self.command_input.value().to_lowercase();
+        all_commands()
+            .into_iter()
+            .filter(|c| {
+                q.is_empty()
+                    || c.name.to_lowercase().contains(&q)
+                    || c.description.to_lowercase().contains(&q)
+            })
+            .collect()
+    }
+
+    /// Execute the currently selected command. Returns true if the caller should
+    /// open the note editor (cannot be done inside AppState).
+    pub fn execute_command(&mut self) -> Result<bool> {
+        let commands = self.filtered_commands();
+        let Some(entry) = commands.get(self.command_cursor).cloned() else {
+            self.mode = AppMode::Browse;
+            return Ok(false);
+        };
+        self.mode = AppMode::Browse;
+        match entry.action {
+            CommandAction::NewList => {
+                self.active_panel = Panel::Lists;
+                self.begin_new_list();
+            }
+            CommandAction::NewNote => {
+                self.active_panel = Panel::Lists;
+                self.begin_new_note();
+            }
+            CommandAction::NewFolder => {
+                self.active_panel = Panel::Lists;
+                self.begin_new_folder();
+            }
+            CommandAction::NewReminder => {
+                if self.current_list().is_some() {
+                    self.begin_new_reminder();
+                } else {
+                    self.set_status("Select a list first.");
+                }
+            }
+            CommandAction::BeginSearch => { self.begin_search(); }
+            CommandAction::CycleSort => {
+                self.active_panel = Panel::Reminders;
+                self.cycle_sort();
+            }
+            CommandAction::ToggleDone => {
+                self.active_panel = Panel::Reminders;
+                self.toggle_done()?;
+            }
+            CommandAction::ToggleShowDone => {
+                self.show_done = !self.show_done;
+                self.clamp_selection();
+                self.set_status(if self.show_done { "Showing completed." } else { "Hiding completed." });
+            }
+            CommandAction::ExportCurrent => { self.export_current()?; }
+            CommandAction::Undo => { self.undo()?; }
+            CommandAction::ShowHelp => { self.mode = AppMode::Help; }
+            CommandAction::BulkSelect => {
+                self.active_panel = Panel::Reminders;
+                self.begin_bulk_select();
+            }
+            CommandAction::MoveReminder => {
+                self.active_panel = Panel::Reminders;
+                self.begin_move_reminder();
+            }
+            CommandAction::MoveItem => {
+                self.active_panel = Panel::Lists;
+                self.begin_move_item();
+            }
+        }
+        Ok(false)
     }
 
     // ── Export ────────────────────────────────────────────────────────────────

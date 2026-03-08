@@ -424,7 +424,37 @@ fn render_edit_form(frame: &mut Frame, app: &AppState, area: Rect) {
 // ── Markdown renderer ─────────────────────────────────────────────────────────
 
 fn render_markdown(input: &str) -> Vec<Line<'static>> {
-    input.lines().map(render_md_line).collect()
+    let mut lines = Vec::new();
+    let mut in_code_block = false;
+    for line in input.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            if in_code_block {
+                in_code_block = false;
+                lines.push(Line::from(Span::styled(
+                    "  └────────────────────────────".to_string(),
+                    theme::dim(),
+                )));
+            } else {
+                in_code_block = true;
+                let lang = trimmed.trim_start_matches('`').trim();
+                let header = if lang.is_empty() {
+                    "  ┌─ code ────────────────────".to_string()
+                } else {
+                    format!("  ┌─ {} ", lang)
+                };
+                lines.push(Line::from(Span::styled(header, theme::dim())));
+            }
+        } else if in_code_block {
+            lines.push(Line::from(vec![
+                Span::styled("  │ ", theme::dim()),
+                Span::styled(line.to_string(), Style::default().fg(Color::Yellow)),
+            ]));
+        } else {
+            lines.push(render_md_line(line));
+        }
+    }
+    lines
 }
 
 fn render_md_line(line: &str) -> Line<'static> {
@@ -465,6 +495,21 @@ fn render_md_line(line: &str) -> Line<'static> {
         ]);
     }
 
+    // Task checkboxes — must come before plain bullet handling
+    if let Some(rest) = line.strip_prefix("- [x] ").or_else(|| line.strip_prefix("- [X] "))
+        .or_else(|| line.strip_prefix("* [x] ")).or_else(|| line.strip_prefix("* [X] "))
+    {
+        return Line::from(vec![
+            Span::styled("  [✓] ", theme::done()),
+            Span::styled(rest.to_owned(), theme::done()),
+        ]);
+    }
+    if let Some(rest) = line.strip_prefix("- [ ] ").or_else(|| line.strip_prefix("* [ ] ")) {
+        let mut spans = vec![Span::styled("  [ ] ", theme::base())];
+        spans.extend(parse_inline(rest));
+        return Line::from(spans);
+    }
+
     if let Some(rest) = line
         .strip_prefix("  - ")
         .or_else(|| line.strip_prefix("  * "))
@@ -484,6 +529,27 @@ fn render_md_line(line: &str) -> Line<'static> {
         let mut spans = vec![Span::styled("  │ ", theme::dim())];
         spans.extend(parse_inline(rest));
         return Line::from(spans);
+    }
+
+    // Numbered lists: `1. item`
+    {
+        let trimmed = line.trim_start();
+        let indent  = line.len() - trimmed.len();
+        let num_end = trimmed.chars().take_while(|c| c.is_ascii_digit()).count();
+        if num_end > 0
+            && trimmed.as_bytes().get(num_end) == Some(&b'.')
+            && trimmed.as_bytes().get(num_end + 1) == Some(&b' ')
+        {
+            let num  = trimmed[..num_end].to_string();
+            let rest = trimmed[num_end + 2..].to_string();
+            let pad  = " ".repeat(indent);
+            let mut spans = vec![
+                Span::raw(pad),
+                Span::styled(format!("{}. ", num), Style::default().fg(Color::Cyan)),
+            ];
+            spans.extend(parse_inline(&rest));
+            return Line::from(spans);
+        }
     }
 
     if line.trim().is_empty() {
@@ -541,6 +607,23 @@ fn parse_inline(input: &str) -> Vec<Span<'static>> {
                 i += 2;
             }
             continue;
+        }
+
+        // Strikethrough: ~~text~~
+        if chars[i] == '~' && i + 1 < chars.len() && chars[i + 1] == '~' {
+            let has_close = chars[i + 2..].windows(2).any(|w| w == ['~', '~']);
+            if has_close {
+                flush!();
+                i += 2;
+                let start = i;
+                while i + 1 < chars.len() && !(chars[i] == '~' && chars[i + 1] == '~') {
+                    i += 1;
+                }
+                let text: String = chars[start..i].iter().collect();
+                spans.push(Span::styled(text, Style::default().add_modifier(Modifier::CROSSED_OUT)));
+                if i + 1 < chars.len() { i += 2; }
+                continue;
+            }
         }
 
         // Italic: *text* or _text_

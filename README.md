@@ -22,36 +22,87 @@ This builds the release binary, installs it to `~/.cargo/bin/ward`, sets up a ba
 ## Usage
 
 ```sh
-ward               # open last workspace, or ~/rmdr by default
+ward               # open last workspace, or ~/ward by default
 ward <directory>   # open a specific directory as the workspace
 ward import <file.md>  # import reminders from a markdown file
 ```
 
 ## Keybindings
 
+### Sidebar (Lists & Notes panel)
+
 | Key | Action |
 |-----|--------|
-| `Tab` / `Shift+Tab` | Switch focus between panels |
-| `j` / `k` or arrow keys | Navigate |
-| `n` | New reminder (in list) / new list (in sidebar) |
+| `j` / `k` or `↑` / `↓` | Navigate |
+| `Shift+↑` / `Shift+↓` | Reorder items |
+| `Enter` / `→` | Enter list / expand folder |
+| `n` | New reminder list |
 | `N` | New note |
-| `f` | New folder |
-| `e` | Edit selected item / open note in `$EDITOR` |
-| `d` / `Delete` | Delete selected item |
-| `Space` | Toggle reminder done |
-| `m` | Move reminder to another list |
-| `s` | Cycle sort order |
-| `h` | Toggle show completed reminders |
+| `f` | New folder/group |
+| `g` | Move selected item into a folder/group |
+| `e` | Rename list or note / open note in `$EDITOR` |
+| `d` / `Delete` | Delete item |
 | `u` | Undo |
-| `x` | Export current list or note |
+| `x` | Export to `~/name.md` |
+
+### Reminders panel
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` or `↑` / `↓` | Navigate |
+| `n` | New reminder |
+| `e` | Edit reminder |
+| `Space` | Toggle done |
+| `d` / `Delete` | Delete |
+| `m` | Move to another list |
+| `V` | Enter bulk-select mode |
+| `s` | Cycle sort order |
+| `h` | Toggle show completed |
 | `/` | Search |
-| `Shift+Up/Down` | Reorder sidebar items |
+
+### Bulk-select mode (`V`)
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Navigate |
+| `Space` | Toggle selection |
+| `Enter` | Mark all selected done |
+| `d` | Delete all selected |
+| `m` | Move all selected to another list |
+| `Esc` | Cancel |
+
+### Global
+
+| Key | Action |
+|-----|--------|
+| `Tab` / `Shift+Tab` | Switch panels |
+| `u` | Undo |
 | `?` | Help |
 | `q` / `Ctrl+C` | Quit |
 
+## CLI commands
+
+```sh
+# List reminders
+ward ls                          # all reminders
+ward ls --list Work              # filter by list name
+ward ls --today                  # due today
+ward ls --overdue                # overdue only
+ward ls --pending                # incomplete only
+
+# Add a reminder without opening the TUI
+ward add "Buy milk" --list Personal --due tomorrow --priority high --tags grocery
+
+# Mark a reminder done by title
+ward done "buy milk"
+
+# Import from a markdown checklist
+ward import tasks.md
+```
+
 ## Data Format
 
-Ward stores data in a directory of JSON files (reminder lists) and markdown files (notes). The default workspace is `~/rmdr`.
+Ward stores data in a directory of JSON files (reminder lists) and markdown files (notes). The default workspace is `~/ward`.
 
 ## Crates
 

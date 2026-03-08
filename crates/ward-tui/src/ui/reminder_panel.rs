@@ -1,4 +1,4 @@
-use crate::app::{AppState, Panel, SortMode};
+use crate::app::{AppMode, AppState, Panel, SortMode};
 use crate::ui::theme;
 use chrono::Local;
 use ratatui::{
@@ -95,10 +95,14 @@ pub fn render(frame: &mut Frame, app: &AppState, area: ratatui::layout::Rect) {
                 }
             });
 
-            let is_selected = i == app.selected_reminder && is_active;
+            let is_bulk_mode     = app.mode == AppMode::BulkSelect;
+            let is_bulk_selected = is_bulk_mode && app.bulk_selected.contains(&r.id);
+            let is_selected      = i == app.selected_reminder && is_active;
 
             let base_style = if r.done {
                 theme::done()
+            } else if is_bulk_selected {
+                ratatui::style::Style::default().fg(ratatui::style::Color::Magenta)
             } else if is_selected {
                 theme::selected()
             } else {
@@ -126,9 +130,13 @@ pub fn render(frame: &mut Frame, app: &AppState, area: ratatui::layout::Rect) {
             };
 
             let prefix = if is_selected { "▶ " } else { "  " };
+            let bulk_mark = if is_bulk_mode {
+                if is_bulk_selected { "[●] " } else { "[ ] " }
+            } else { "" };
 
             let mut spans = vec![
                 Span::raw(prefix),
+                Span::styled(bulk_mark, base_style),
                 Span::styled(checkbox, base_style),
                 Span::raw(" "),
                 Span::styled(title, base_style),

@@ -31,13 +31,15 @@ pub fn render(frame: &mut Frame, app: &AppState) {
         AppMode::Help => render_help(frame, area),
         AppMode::Search => render_search_overlay(frame, app, area),
         AppMode::MoveReminder => render_move_overlay(frame, app, area),
+        AppMode::MoveItem => render_move_item_overlay(frame, app, area),
+        AppMode::CommandPalette => render_command_palette(frame, app, area),
         _ => {}
     }
 }
 
 fn render_titlebar(frame: &mut Frame, area: Rect) {
     let title = Line::from(vec![
-        Span::styled(" rmdr ", theme::accent()),
+        Span::styled(" ward ", theme::accent()),
         Span::styled("─ Terminal Reminders & Notes", theme::dim()),
     ]);
     frame.render_widget(Paragraph::new(title).style(theme::base()), area);
@@ -124,6 +126,12 @@ fn render_statusbar(frame: &mut Frame, app: &AppState, area: Rect) {
         AppMode::ConfirmDelete => vec![("y", "confirm"), ("n/Esc", "cancel")],
         AppMode::Search => vec![("type", "filter"), ("Enter", "confirm"), ("Esc", "cancel")],
         AppMode::MoveReminder => vec![("↑↓", "pick list"), ("Enter", "move here"), ("Esc", "cancel")],
+        AppMode::BulkSelect => vec![
+            ("Space", "toggle"), ("j/k", "navigate"), ("Enter", "mark done"),
+            ("d", "delete selected"), ("m", "move selected"), ("Esc", "cancel"),
+        ],
+        AppMode::MoveItem => vec![("↑↓", "pick folder"), ("Enter", "move here"), ("Esc", "cancel")],
+        AppMode::CommandPalette => vec![("type", "filter"), ("↑↓", "navigate"), ("Enter", "run"), ("Esc", "cancel")],
         AppMode::Help => vec![("any key", "close")],
     };
 
@@ -343,6 +351,147 @@ fn render_move_overlay(frame: &mut Frame, app: &AppState, area: Rect) {
     frame.render_stateful_widget(List::new(items), inner, &mut list_state);
 }
 
+fn render_move_item_overlay(frame: &mut Frame, app: &AppState, area: Rect) {
+    use crate::app::item_at_path_pub;
+    use ward_core::model::Item;
+
+    let folders = app.flat_folders();
+    // entries: 0 = workspace root, 1..=N = folders
+    let total = folders.len() + 1;
+
+    let height = (total as u16 + 4).min(area.height);
+    let popup_area = centered_rect(52, height, area);
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::active_border())
+        .title(" Move to folder ")
+        .title_style(theme::accent())
+        .style(Style::default().bg(theme::SURFACE));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let cursor = app.move_list_cursor;
+    let mut entries: Vec<ListItem> = Vec::new();
+
+    // Root entry
+    let is_root_sel = cursor == 0;
+    entries.push(ListItem::new(Line::from(vec![
+        Span::raw(if is_root_sel { "▶ " } else { "  " }),
+        Span::styled("(workspace root)", if is_root_sel { theme::selected() } else { theme::dim() }),
+    ])));
+
+    for (idx, fi) in folders.iter().enumerate() {
+        let is_sel = cursor == idx + 1;
+        let indent = "  ".repeat(fi.depth);
+        let name = match item_at_path_pub(&app.store.items, &fi.path) {
+            Some(Item::Folder(f)) => f.display_name(),
+            _ => continue,
+        };
+        entries.push(ListItem::new(Line::from(vec![
+            Span::raw(if is_sel { "▶ " } else { "  " }),
+            Span::raw(indent),
+            Span::styled(name, if is_sel { theme::selected() } else { theme::base() }),
+        ])));
+    }
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(cursor.min(total.saturating_sub(1))));
+    frame.render_stateful_widget(List::new(entries), inner, &mut list_state);
+}
+
+fn render_command_palette(frame: &mut Frame, app: &AppState, area: Rect) {
+    let commands = app.filtered_commands();
+    let visible  = commands.len().min(12);
+    // input row + separator + up-to-12 result rows + borders = visible*2 + 4
+    let height   = (visible as u16 * 2 + 4).max(6).min(area.height.saturating_sub(4));
+    let popup_area = centered_rect(70, height, area);
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::active_border())
+        .title("  Command Palette  ")
+        .title_style(theme::accent())
+        .style(Style::default().bg(theme::SURFACE));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    // Split: input row on top, results below
+    use ratatui::layout::{Constraint, Direction, Layout};
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    // Input
+    let query = app.command_input.value();
+    let input_line = Line::from(vec![
+        Span::styled("  ", theme::dim()),
+        Span::styled("> ", theme::accent()),
+        Span::styled(query, theme::base()),
+    ]);
+    frame.render_widget(Paragraph::new(input_line), sections[0]);
+    frame.set_cursor_position((
+        sections[0].x + 4 + app.command_input.visual_cursor() as u16,
+        sections[0].y,
+    ));
+
+    if commands.is_empty() {
+        frame.render_widget(
+            Paragraph::new("  No matching commands.").style(theme::dim()),
+            sections[1],
+        );
+        return;
+    }
+
+    // Scroll so selected item stays visible (2 rows per entry)
+    let visible_entries = (sections[1].height as usize / 2).max(1);
+    let scroll = if app.command_cursor >= visible_entries {
+        app.command_cursor - visible_entries + 1
+    } else {
+        0
+    };
+
+    let mut y = sections[1].y;
+    for (i, cmd) in commands.iter().enumerate().skip(scroll) {
+        if y + 1 >= sections[1].y + sections[1].height { break; }
+        let is_sel = i == app.command_cursor;
+        let bg = if is_sel { theme::SURFACE } else { theme::BG };
+        let name_style = if is_sel { theme::selected() } else { theme::base() };
+        let desc_style = if is_sel { theme::dim() } else { theme::dim() };
+
+        // Row 1: name + shortcut
+        let name_line = Line::from(vec![
+            Span::raw(if is_sel { "  ▶ " } else { "    " }),
+            Span::styled(cmd.name, name_style.add_modifier(ratatui::style::Modifier::BOLD)),
+            Span::raw("  "),
+            Span::styled(
+                format!("[{}]", cmd.shortcut),
+                Style::default().fg(ratatui::style::Color::DarkGray),
+            ),
+        ]);
+        frame.render_widget(
+            Paragraph::new(name_line).style(Style::default().bg(bg)),
+            Rect::new(sections[1].x, y, sections[1].width, 1),
+        );
+        y += 1;
+        if y >= sections[1].y + sections[1].height { break; }
+
+        // Row 2: description
+        let desc_line = Line::from(vec![
+            Span::raw("      "),
+            Span::styled(cmd.description, desc_style),
+        ]);
+        frame.render_widget(
+            Paragraph::new(desc_line).style(Style::default().bg(bg)),
+            Rect::new(sections[1].x, y, sections[1].width, 1),
+        );
+        y += 1;
+    }
+}
+
 fn render_help(frame: &mut Frame, area: Rect) {
     let popup_area = centered_rect(72, 32, area);
     frame.render_widget(Clear, popup_area);
@@ -360,6 +509,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::from(vec![Span::styled("  e", theme::key_hint()), Span::styled("                   Open note in $EDITOR  /  rename list", theme::key_desc())]),
         Line::from(vec![Span::styled("  Enter / →", theme::key_hint()), Span::styled("           Enter list", theme::key_desc())]),
         Line::from(vec![Span::styled("  d", theme::key_hint()), Span::styled("                   Delete  (u to undo)", theme::key_desc())]),
+        Line::from(vec![Span::styled("  g", theme::key_hint()), Span::styled("                   Move item into a folder/group", theme::key_desc())]),
         Line::from(vec![Span::styled("  x", theme::key_hint()), Span::styled("                   Export to ~/name.md", theme::key_desc())]),
         Line::from(""),
         Line::from(Span::styled("  Reminders", theme::accent())),
@@ -369,6 +519,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::from(vec![Span::styled("  Space", theme::key_hint()), Span::styled("               Toggle done/undone", theme::key_desc())]),
         Line::from(vec![Span::styled("  d", theme::key_hint()), Span::styled("                   Delete  (u to undo)", theme::key_desc())]),
         Line::from(vec![Span::styled("  m", theme::key_hint()), Span::styled("                   Move to another list", theme::key_desc())]),
+        Line::from(vec![Span::styled("  V", theme::key_hint()), Span::styled("                   Enter bulk select mode", theme::key_desc())]),
         Line::from(vec![Span::styled("  s", theme::key_hint()), Span::styled("                   Cycle sort order", theme::key_desc())]),
         Line::from(vec![Span::styled("  /", theme::key_hint()), Span::styled("                   Search / filter", theme::key_desc())]),
         Line::from(vec![Span::styled("  h", theme::key_hint()), Span::styled("                   Toggle show completed", theme::key_desc())]),
@@ -385,7 +536,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(theme::active_border())
-                .title(" Help — rmdr keybindings ")
+                .title(" Help — ward keybindings ")
                 .title_style(theme::accent())
                 .style(Style::default().bg(theme::SURFACE)),
         ),
